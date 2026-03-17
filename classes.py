@@ -1,0 +1,169 @@
+import torch.nn as nn
+import torch
+
+class SinPositionalEmbedding(nn.Module):
+    def __init__(self, dim):
+        super(SinPositionalEmbedding, self).__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        device = t.device
+        half_dim = self.dim // 2
+        emb = torch.exp(torch.arange(half_dim, device=device) * -(torch.log(torch.tensor(10000.0)) / half_dim))
+        emb = t[:, None] * emb[None, :]
+        return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, time_dim, kernel_size=3, padding=1, n_groups=32):
+        super(ResBlock, self).__init__()
+        gn1_groups = n_groups if in_channels % n_groups == 0 else 1
+        gn2_groups = n_groups if out_channels % n_groups == 0 else 1
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)
+        self.gn1 = nn.GroupNorm(gn1_groups, in_channels)
+        self.silu = nn.SiLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, padding=padding)
+        self.gn2 = nn.GroupNorm(gn2_groups, out_channels)
+        self.time_mlp = nn.Linear(time_dim, out_channels * 2)
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1),
+                nn.GroupNorm(gn2_groups, out_channels)
+            )
+        else:
+            self.shortcut = nn.Identity()
+    
+    def forward(self, x, time_emb):
+        h = self.gn1(x)
+        h = self.silu(h)
+        h = self.conv1(h)
+        scale, shift = self.time_mlp(time_emb).chunk(2, dim=-1)
+        scale = scale[:, :, None, None]
+        shift = shift[:, :, None, None]
+
+        h =self.gn2(h)
+        h = h * (1 + scale) + shift
+        h = self.silu(h)
+        h = self.conv2(h)
+        return h + self.shortcut(x)
+    
+class UNet(nn.Module):
+    def __init__(self, n_channels, base_dim, n_heads=8):
+        super(UNet, self).__init__()
+        self.base_dim = base_dim
+        assert base_dim % n_heads == 0, "base_dim must be divisible by n_heads"
+        self.time_mlp = nn.Sequential(
+            SinPositionalEmbedding(base_dim),
+            nn.Linear(base_dim, base_dim * 4),
+            nn.SiLU(),
+            nn.Linear(base_dim * 4, base_dim)
+        )
+        self.down1 = ResBlock(n_channels, base_dim, base_dim)
+        self.down2 = ResBlock(base_dim, base_dim * 2, base_dim)
+        self.down3 = ResBlock(base_dim * 2, base_dim * 4, base_dim)
+        self.up1 = ResBlock(base_dim * 4 + base_dim * 2, base_dim * 2, base_dim)
+        self.up2 = ResBlock(base_dim * 2 + base_dim, base_dim, base_dim)
+        self.up3 = ResBlock(base_dim, base_dim, base_dim)
+        self.pool = nn.MaxPool2d(2)
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.attention = nn.MultiheadAttention(base_dim * 4, num_heads=n_heads)
+        self.attention_layernorm = nn.GroupNorm(1, base_dim * 4)
+        self.out = nn.Conv2d(base_dim, n_channels, kernel_size=1)
+
+    def forward(self, x, time_step):
+        time_emb = self.time_mlp(time_step.float())
+        d1 = self.down1(x, time_emb)
+        d2 = self.down2(self.pool(d1), time_emb)
+        d3 = self.down3(self.pool(d2), time_emb)
+        b, c, h, w = d3.shape
+        d3_flat = d3.view(b, c, -1).permute(2, 0, 1)
+        attn_out, _ = self.attention(d3_flat, d3_flat, d3_flat)
+        attn_out = attn_out.permute(1, 2, 0).view(b, c, h, w)
+        attn_out = self.attention_layernorm(attn_out + d3)
+        attn_out = self.upsample(attn_out)
+        u1 = self.up1(torch.cat([attn_out, d2], dim=1), time_emb)
+        u1 = self.upsample(u1)
+        u2 = self.up2(torch.cat([u1, d1], dim=1), time_emb)
+        u3 = self.up3(u2, time_emb)
+        out = self.out(u3)
+        return out
+    
+class DDPM(nn.Module):
+    def __init__(self, n_channels, base_dim, T, beta_start=1e-4, beta_end=0.02, device=None):
+        super(DDPM, self).__init__()
+        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = UNet(n_channels, base_dim).to(self.device)
+        self.T = T
+        self.beta = torch.linspace(beta_start, beta_end, T, device=self.device)
+        self.alpha = 1.0 - self.beta
+        self.alpha_bar = torch.cumprod(self.alpha, dim=0)
+        self.sqrt_alpha_bar = torch.sqrt(self.alpha_bar)
+        self.sqrt_one_minus_alpha_bar = torch.sqrt(1 - self.alpha_bar)
+        self.sqrt_beta = torch.sqrt(self.beta)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+
+    def q_sample(self, x0, t):
+        x0 = x0.to(self.device)
+        t = t.to(self.device)
+        noise = torch.randn_like(x0, device=self.device)
+        return self.sqrt_alpha_bar[t].view(-1, 1, 1, 1) * x0 + self.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1) * noise, noise
+    def p_sample(self, xt, t):
+        xt = xt.to(self.device)
+        if not isinstance(t, torch.Tensor):
+            t = torch.full((xt.size(0),), t, device=self.device, dtype=torch.long)
+        else:
+            t = t.to(self.device)
+        pred_noise = self.model(xt, t)
+        mean = (
+            1 / torch.sqrt(self.alpha[t]).view(-1, 1, 1, 1) *
+            (xt - (self.beta[t] / self.sqrt_one_minus_alpha_bar[t]).view(-1, 1, 1, 1) * pred_noise)
+        )
+        noise = torch.randn_like(xt)
+        mask = (t > 0).float().view(-1, 1, 1, 1)
+        return mean + mask * self.sqrt_beta[t].view(-1, 1, 1, 1) * noise
+    def sample(self, shape, T):
+        xt = torch.randn(shape, device=self.device)
+        for t in reversed(range(T)):
+            xt = self.p_sample(xt, t)
+        return xt
+    def train_step(self, x0, t):
+        x0 = x0.to(self.device)
+        t = t.to(self.device)
+        xt, noise = self.q_sample(x0, t)
+        pred_noise = self.model(xt, t)
+        loss = nn.MSELoss()(pred_noise, noise)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        return loss
+
+if __name__ == "__main__":
+    from torchvision.datasets import MNIST
+    from torchvision.transforms import ToTensor
+    from torch.utils.data import DataLoader
+    from torchvision.transforms import Compose, ToTensor, Normalize
+    transform = Compose([
+    ToTensor(),
+        Normalize((0.5,), (0.5,))
+    ])
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dataset = MNIST(root='data', train=True, transform=transform, download=True)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    model = DDPM(n_channels=1, base_dim=64, T=500, device=device)
+    for epoch in range(5):
+        for x, _ in dataloader:
+            x = x.to(device)
+            t = torch.randint(0, model.T, (x.size(0),), device=device)
+            loss = model.train_step(x, t)
+        print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    with torch.no_grad():
+        samples = model.sample((16, 1, 28, 28), T=500)
+        samples = (samples + 1) / 2
+    samples = samples.detach().cpu()
+    fig, axes = plt.subplots(4, 4, figsize=(8, 8))
+    for i, ax in enumerate(axes.flatten()):
+        ax.imshow(samples[i, 0], cmap='gray')
+        ax.axis('off')
+    plt.savefig('samples.png')
