@@ -69,16 +69,20 @@ class UNet(nn.Module):
         self.attention_layernorm = nn.GroupNorm(1, base_dim * 4)
         self.out = nn.Conv2d(base_dim, n_channels, kernel_size=1)
 
-    def forward(self, x, time_step):
-        time_emb = self.time_mlp(time_step.float())
+    def encode(self, x, time_emb):
         d1 = self.down1(x, time_emb)
         d2 = self.down2(self.pool(d1), time_emb)
         d3 = self.down3(self.pool(d2), time_emb)
-        b, c, h, w = d3.shape
-        d3_flat = d3.view(b, c, -1).permute(2, 0, 1)
-        attn_out, _ = self.attention(d3_flat, d3_flat, d3_flat)
+        return d1, d2, d3
+    
+    def spatial_attention(self, x):
+        b, c, h, w = x.shape
+        x_flat = x.view(b, c, -1).permute(2, 0, 1)
+        attn_out, _ = self.attention(x_flat, x_flat, x_flat)
         attn_out = attn_out.permute(1, 2, 0).view(b, c, h, w)
-        attn_out = self.attention_layernorm(attn_out + d3)
+        return self.attention_layernorm(attn_out + x)
+    
+    def decode(self, d1, d2, attn_out, time_emb):
         attn_out = self.upsample(attn_out)
         u1 = self.up1(torch.cat([attn_out, d2], dim=1), time_emb)
         u1 = self.upsample(u1)
@@ -86,7 +90,13 @@ class UNet(nn.Module):
         u3 = self.up3(u2, time_emb)
         out = self.out(u3)
         return out
-    
+
+    def forward(self, x, time_step):
+        time_emb = self.time_mlp(time_step.float())
+        d1, d2, d3 = self.encode(x, time_emb)
+        attn_out = self.spatial_attention(d3)
+        return self.decode(d1, d2, attn_out, time_emb)
+
 class DDPM(nn.Module):
     def __init__(self, n_channels, base_dim, T, beta_start=1e-4, beta_end=0.02, device=None):
         super(DDPM, self).__init__()
