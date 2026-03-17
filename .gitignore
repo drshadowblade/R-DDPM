@@ -1,2 +1,5 @@
 data/
 samples.png
+__pycache__/
+bullet_generated.gif
+bullet_comparison.png

@@ -7,9 +7,8 @@ class SinPositionalEmbedding(nn.Module):
         self.dim = dim
 
     def forward(self, t):
-        device = t.device
         half_dim = self.dim // 2
-        emb = torch.exp(torch.arange(half_dim, device=device) * -(torch.log(torch.tensor(10000.0)) / half_dim))
+        emb = torch.exp(torch.arange(half_dim) * -(torch.log(torch.tensor(10000.0)) / half_dim))
         emb = t[:, None] * emb[None, :]
         return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
@@ -100,28 +99,24 @@ class UNet(nn.Module):
 class DDPM(nn.Module):
     def __init__(self, n_channels, base_dim, T, beta_start=1e-4, beta_end=0.02, device=None):
         super(DDPM, self).__init__()
-        self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = UNet(n_channels, base_dim).to(self.device)
+        self.model = UNet(n_channels, base_dim)
         self.T = T
-        self.beta = torch.linspace(beta_start, beta_end, T, device=self.device)
+        self.beta = torch.linspace(beta_start, beta_end, T, )
         self.alpha = 1.0 - self.beta
-        self.alpha_bar = torch.cumprod(self.alpha, dim=0)
-        self.sqrt_alpha_bar = torch.sqrt(self.alpha_bar)
-        self.sqrt_one_minus_alpha_bar = torch.sqrt(1 - self.alpha_bar)
+        self.sqrt_alpha_bar = torch.sqrt(torch.cumprod(self.alpha, dim=0))
+        self.sqrt_one_minus_alpha_bar = torch.sqrt(1 - torch.cumprod(self.alpha, dim=0))
         self.sqrt_beta = torch.sqrt(self.beta)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
 
     def q_sample(self, x0, t):
-        x0 = x0.to(self.device)
-        t = t.to(self.device)
-        noise = torch.randn_like(x0, device=self.device)
+        noise = torch.randn_like(x0)
         return self.sqrt_alpha_bar[t].view(-1, 1, 1, 1) * x0 + self.sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1) * noise, noise
     def p_sample(self, xt, t):
-        xt = xt.to(self.device)
+        xt = xt
         if not isinstance(t, torch.Tensor):
-            t = torch.full((xt.size(0),), t, device=self.device, dtype=torch.long)
+            t = torch.full((xt.size(0),), t, dtype=torch.long)
         else:
-            t = t.to(self.device)
+            t = t
         pred_noise = self.model(xt, t)
         mean = (
             1 / torch.sqrt(self.alpha[t]).view(-1, 1, 1, 1) *
@@ -131,13 +126,13 @@ class DDPM(nn.Module):
         mask = (t > 0).float().view(-1, 1, 1, 1)
         return mean + mask * self.sqrt_beta[t].view(-1, 1, 1, 1) * noise
     def sample(self, shape, T):
-        xt = torch.randn(shape, device=self.device)
+        xt = torch.randn(shape, )
         for t in reversed(range(T)):
             xt = self.p_sample(xt, t)
         return xt
-    def train_step(self, x0, t):
-        x0 = x0.to(self.device)
-        t = t.to(self.device)
+    def train_step(self, x0):
+        x0 = x0
+        t = torch.randint(0, self.T, (x0.size(0),), )
         xt, noise = self.q_sample(x0, t)
         pred_noise = self.model(xt, t)
         loss = nn.MSELoss()(pred_noise, noise)
@@ -162,8 +157,7 @@ if __name__ == "__main__":
     for epoch in range(5):
         for x, _ in dataloader:
             x = x.to(device)
-            t = torch.randint(0, model.T, (x.size(0),), device=device)
-            loss = model.train_step(x, t)
+            loss = model.train_step(x)
         print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
     import matplotlib
     matplotlib.use('Agg')
