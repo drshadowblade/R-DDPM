@@ -45,8 +45,26 @@ class ResBlock(nn.Module):
         h = self.conv2(h)
         return h + self.shortcut(x)
     
+class ResBlockStack(nn.Module):
+    """
+    Stack of ResBlocks that forwards the time embedding to each block.
+    Used to increase depth within each UNet stage without changing spatial scales.
+    """
+    def __init__(self, in_channels, out_channels, time_dim, n_blocks=1):
+        super(ResBlockStack, self).__init__()
+        self.blocks = nn.ModuleList()
+        # first block may change channel dimension
+        self.blocks.append(ResBlock(in_channels, out_channels, time_dim))
+        for _ in range(n_blocks - 1):
+            self.blocks.append(ResBlock(out_channels, out_channels, time_dim))
+
+    def forward(self, x, time_emb):
+        h = x
+        for b in self.blocks:
+            h = b(h, time_emb)
+        return h
 class UNet(nn.Module):
-    def __init__(self, n_channels, base_dim, n_heads=8):
+    def __init__(self, n_channels, base_dim, n_heads=8, n_res_blocks=1):
         super(UNet, self).__init__()
         self.base_dim = base_dim
         assert base_dim % n_heads == 0, "base_dim must be divisible by n_heads"
@@ -56,12 +74,13 @@ class UNet(nn.Module):
             nn.SiLU(),
             nn.Linear(base_dim * 4, base_dim)
         )
-        self.down1 = ResBlock(n_channels, base_dim, base_dim)
-        self.down2 = ResBlock(base_dim, base_dim * 2, base_dim)
-        self.down3 = ResBlock(base_dim * 2, base_dim * 4, base_dim)
-        self.up1 = ResBlock(base_dim * 4 + base_dim * 2, base_dim * 2, base_dim)
-        self.up2 = ResBlock(base_dim * 2 + base_dim, base_dim, base_dim)
-        self.up3 = ResBlock(base_dim, base_dim, base_dim)
+        # allow stacking multiple ResBlocks per stage to increase depth
+        self.down1 = ResBlockStack(n_channels, base_dim, base_dim, n_blocks=n_res_blocks)
+        self.down2 = ResBlockStack(base_dim, base_dim * 2, base_dim, n_blocks=n_res_blocks)
+        self.down3 = ResBlockStack(base_dim * 2, base_dim * 4, base_dim, n_blocks=n_res_blocks)
+        self.up1 = ResBlockStack(base_dim * 4 + base_dim * 2, base_dim * 2, base_dim, n_blocks=n_res_blocks)
+        self.up2 = ResBlockStack(base_dim * 2 + base_dim, base_dim, base_dim, n_blocks=n_res_blocks)
+        self.up3 = ResBlockStack(base_dim, base_dim, base_dim, n_blocks=n_res_blocks)
         self.pool = nn.MaxPool2d(2)
         self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
         self.attention = nn.MultiheadAttention(base_dim * 4, num_heads=n_heads)

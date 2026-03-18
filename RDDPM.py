@@ -4,8 +4,8 @@ import torch
 from torch import nn
 
 class RUnet(UNet):
-    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 2, n_heads=8):
-        super(RUnet, self).__init__(n_channels, base_dim, n_heads)   
+    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 2, n_heads=8, n_res_blocks=1):
+        super(RUnet, self).__init__(n_channels, base_dim, n_heads, n_res_blocks)   
         self.gru = ConvGRU(
             input_size=base_dim * 4,
             hidden_sizes=base_dim * 4,
@@ -34,10 +34,10 @@ class RUnet(UNet):
         return out, h
     
 class RDDPM(nn.Module):
-    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 4, n_heads=8, beta_start =1e-4, beta_end=0.02, T=1000):
+    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 4, n_heads=8, n_res_blocks=1, beta_start =1e-4, beta_end=0.02, T=1000):
         super().__init__()
         self.T = T
-        self.model = RUnet(input_size, n_channels, base_dim, gru_n_layers, n_heads)
+        self.model = RUnet(input_size, n_channels, base_dim, gru_n_layers, n_heads, n_res_blocks)
         self.beta =  torch.linspace(beta_start, beta_end, T)
         self.alpha = 1.0 - self.beta
         self.sqrt_alpha_bar = torch.sqrt(torch.cumprod(self.alpha, dim=0))

@@ -33,7 +33,7 @@ model = RDDPM(
 )
 
 print("Training...")
-for step in range(200):
+for step in range(2000):
     loss = model.train_step(x0_seq, lt_seq)
     if step % 50 == 0:
         print(f"  Step {step}: loss={loss:.4f}")
