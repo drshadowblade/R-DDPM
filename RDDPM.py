@@ -31,7 +31,7 @@ class RUnet(UNet):
         h = upd_hidden
         h_last = h[-1] if isinstance(h, list) else h
         gate = torch.sigmoid(h_last)
-        drop = attn_out * (1 + gate)
+        drop = attn_out * gate
         out = self.decode(d1, d2, drop, emb)
         return out, h
     
