@@ -82,7 +82,8 @@ class UNet(nn.Module):
         self.up2 = ResBlockStack(base_dim * 2 + base_dim, base_dim, base_dim, n_blocks=n_res_blocks)
         self.up3 = ResBlockStack(base_dim, base_dim, base_dim, n_blocks=n_res_blocks)
         self.pool = nn.MaxPool2d(2)
-        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.upsample1 = nn.ConvTranspose2d(base_dim * 4, base_dim * 4, kernel_size=2, stride=2)
+        self.upsample2 = nn.ConvTranspose2d(base_dim * 2, base_dim * 2, kernel_size=2, stride=2)
         self.attention = nn.MultiheadAttention(base_dim * 4, num_heads=n_heads)
         self.attention_layernorm = nn.GroupNorm(1, base_dim * 4)
         self.out = nn.Conv2d(base_dim, n_channels, kernel_size=1)
@@ -101,9 +102,9 @@ class UNet(nn.Module):
         return self.attention_layernorm(attn_out + x)
     
     def decode(self, d1, d2, attn_out, time_emb):
-        attn_out = self.upsample(attn_out)
+        attn_out = self.upsample1(attn_out)
         u1 = self.up1(torch.cat([attn_out, d2], dim=1), time_emb)
-        u1 = self.upsample(u1)
+        u1 = self.upsample2(u1)
         u2 = self.up2(torch.cat([u1, d1], dim=1), time_emb)
         u3 = self.up3(u2, time_emb)
         out = self.out(u3)
@@ -169,13 +170,11 @@ if __name__ == "__main__":
     ToTensor(),
         Normalize((0.5,), (0.5,))
     ])
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dataset = MNIST(root='data', train=True, transform=transform, download=True)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-    model = DDPM(n_channels=1, base_dim=64, T=500, device=device)
+    model = DDPM(n_channels=1, base_dim=64, T=500)
     for epoch in range(5):
         for x, _ in dataloader:
-            x = x.to(device)
             loss = model.train_step(x)
         print(f"Epoch {epoch+1}, Loss: {loss.item():.4f}")
     import matplotlib
