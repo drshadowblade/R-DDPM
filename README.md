@@ -55,6 +55,7 @@ Detailed file & class reference
         - `p_sample(xt, dt, lt, h_prev=None)` — single reverse step conditioned on current timestep `dt` and visit label `lt`. Carries and returns recurrent hidden state.
         - `sample(shape, T, lt_seq)` — sample a longitudinal sequence: for each visit label in `lt_seq` the model starts from noise, denoises through timesteps, and carries the GRU state between visits. Returns a list of generated frames (one per visit).
         - `train_step(x0_seq, lt_seq)` — trains on a sequence of frames (list or tensor sequence) and returns the total MSE loss; detaches recurrent states to prevent gradient accumulation across sequence boundaries.
+        - `RDDIM` subclass: For DDIM-style sampling, `RDDIM` is provided (it subclasses `RDDPM`) and implements `p_sample_ddim(xt, dt, lt, h_prev=None)` and `sample(shape, T, lt_seq, device=None)`. The constructor accepts an `eta` parameter (default `0.0`) for deterministic (`eta=0.0`) or stochastic (`eta>0`) sampling. `RDDIM.sample` keeps the same `T` / `lt_seq` signature as `RDDPM.sample` for compatibility.
 
 3) convgru/convgru.py
 
@@ -83,6 +84,7 @@ Functional tests (what they do)
         - `functional_test_grid.png` — 4×N grid showing GT and generated sequences.
         - `gen_seq1_grow.gif` and `gen_seq2_shrink.gif` — animated comparisons.
     - Command: `python functional_test_2.py`.
+    - Note: `functional_test_2.py` has been instrumented to print per-section timings when run (sequence build, training, sampling, image/GIF saving, and total runtime).
 
 Quick start
 
@@ -98,14 +100,3 @@ Run the functional tests (they use synthetic data and do not require MNIST files
 python functional_test_1.py
 python functional_test_2.py
 ```
-
-Notes and next steps
-
-- The functional tests are intentionally self-contained and generate synthetic sequences in-memory. They are useful to validate the recurrent denoising flow without external datasets.
-- If you prefer to run the MNIST example, run `classes.py` directly — it contains a `__main__` snippet that uses `torchvision.datasets.MNIST` and saves `samples.png`.
-- I can add any of the following if you'd like:
-    - a `requirements.txt` with pinned versions;
-    - simple CLI wrappers for the functional tests (control `device`, `steps`, `image-size` via args);
-    - small example notebooks or scripts that load real longitudinal datasets.
-
-If you want one of those, tell me which and I'll add it.
