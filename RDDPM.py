@@ -84,8 +84,9 @@ class RDDPM(nn.Module):
             else:
                 lt_batch = lt.expand(shape[0])
             for t in reversed(range(T)):
-                xt, h = self.p_sample(xt, t, lt_batch, h_prev=h)
-            outputs.append(xt.detach().clone())
+                xt, h_new = self.p_sample(xt, t, lt, h_prev=h)
+            h = h_new
+            outputs.append(xt)
         return outputs
     def train_step(self, x0_seq, lt_seq):
         h = None
