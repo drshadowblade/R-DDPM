@@ -31,7 +31,7 @@ class RUnet(UNet):
         h = upd_hidden
         h_last = h[-1] if isinstance(h, list) else h
         gate = torch.sigmoid(h_last)
-        drop = attn_out * gate
+        drop = attn_out * (1 + gate)
         out = self.decode(d1, d2, drop, emb)
         return out, h
     
@@ -77,12 +77,9 @@ class RDDPM(nn.Module):
     def sample(self, shape, T, lt_seq):
         h = None
         outputs = []
-        xt = torch.randn(*shape)
         for lt in lt_seq:
-            if not isinstance(lt, torch.Tensor):
-                lt_batch = torch.full((shape[0],), lt, dtype=torch.long)
-            else:
-                lt_batch = lt.expand(shape[0])
+            xt = torch.randn(shape)
+            lt = lt.expand(shape[0])
             for t in reversed(range(T)):
                 xt, h_new = self.p_sample(xt, t, lt, h_prev=h)
             h = h_new
@@ -117,7 +114,7 @@ class RDDIM(RDDPM):
         self.sqrt_alpha_bar = torch.sqrt(self.alpha_bar)
         self.sqrt_one_minus_alpha_bar = torch.sqrt(1.0 - self.alpha_bar)
 
-    def p_sample_ddim(self, xt, dt, lt, h_prev=None):
+    def p_sample(self, xt, dt, lt, h_prev=None):
         if not isinstance(dt, torch.Tensor):
             dt = torch.full((xt.size(0),), dt, dtype=torch.long)
         else:
@@ -155,18 +152,14 @@ class RDDIM(RDDPM):
             x_prev = mask * x_prev + (1 - mask) * x0_pred
             return x_prev, h
 
-    def sample(self, shape, T, lt_seq, device=None):
-        device = next(self.model.parameters()).device if device is None else device
+    def sample(self, shape, T, lt_seq):
         h = None
         outputs = []
-        xt = torch.randn(*shape, device=device)
         for lt in lt_seq:
-            if not isinstance(lt, torch.Tensor):
-                lt_batch = torch.full((shape[0],), lt, dtype=torch.long, device=device)
-            else:
-                lt_batch = lt.to(device).expand(shape[0])
+            xt = torch.randn(shape)
+            lt = lt.expand(shape[0])
             for t in reversed(range(T)):
-                t_batch = torch.full((shape[0],), t, dtype=torch.long, device=device)
-                xt, h = self.p_sample_ddim(xt, t_batch, lt_batch, h_prev=h)
-            outputs.append(xt.detach().clone())
+                xt, h_new = self.p_sample(xt, t, lt, h_prev=h)
+            h = h_new
+            outputs.append(xt)
         return outputs

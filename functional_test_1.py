@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from RDDPM import RDDPM
+from RDDPM import RDDPM, RDDIM
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 print(f"Using device: {device}")
@@ -25,11 +25,12 @@ positions = torch.linspace(0.1, 0.9, n_visits)
 x0_seq = torch.stack([make_bullet_frame(pos) for pos in positions], dim=0)
 lt_seq = torch.arange(n_visits, dtype=torch.long)
 
-model = RDDPM(
+model = RDDIM(
     input_size=(H, W),
     n_channels=C,
     base_dim=base_dim,
-    T=T
+    T=T,
+    beta_schedule="Linear"
 )
 
 print("Training...")

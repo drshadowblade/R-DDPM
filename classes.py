@@ -1,5 +1,11 @@
 import torch.nn as nn
 import torch
+from torch.utils.data import Dataset
+import numpy as np
+import nibabel as nib
+from pathlib import Path
+import pandas as pd
+from utils import load_session_tensor
 
 class SinPositionalEmbedding(nn.Module):
     def __init__(self, dim):
@@ -160,6 +166,51 @@ class DDPM(nn.Module):
         loss.backward()
         self.optimizer.step()
         return loss
+
+class LongitudinalMRIDataset:
+    def __init__(self, session_table, data_root, sequences,
+                 slice_axis, slice_idx, target_hw, min_sessions=4):
+        self.data_root = data_root
+        self.sequences = sequences
+        self.slice_axis = slice_axis
+        self.slice_idx = slice_idx
+        self.target_hw = target_hw
+        self.sessions = session_table.reset_index(drop=True)
+
+        if len(self.sessions) < min_sessions:
+            raise ValueError(
+                f"Only {len(self.sessions)} sessions found; need at least {min_sessions}."
+            )
+        print(f"Dataset: {len(self.sessions)} sessions, {len(sequences)} channels "
+              f"({', '.join(sequences)})")
+
+    def __call__(self):
+        import nibabel as nib
+        frames = []
+        for _, row in self.sessions.iterrows():
+            H, W = self.target_hw
+            channels = []
+            for seq in self.sequences:
+                fname = row.get(seq)
+                if fname and isinstance(fname, str):
+                    fpath = Path(self.data_root) / fname
+                    if fpath.exists():
+                        img = nib.load(str(fpath))
+                        shape = img.shape
+                        central_idx = shape[self.slice_axis] // 2
+                        from utils import load_nifti_slice
+                        sl = load_nifti_slice(fpath, self.slice_axis, central_idx, self.target_hw)
+                        channels.append(sl)
+                        continue
+                channels.append(np.zeros((H, W), dtype=np.float32))
+            arr = np.stack(channels, axis=0)
+            t = torch.from_numpy(arr).unsqueeze(0)
+            frames.append(t)
+        lt_seq = torch.arange(len(frames), dtype=torch.long)
+        return frames, lt_seq
+    
+    def __len__(self):
+        return len(self.sessions)
 
 if __name__ == "__main__":
     from torchvision.datasets import MNIST

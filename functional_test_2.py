@@ -13,7 +13,7 @@ B, C, H, W = 1, 1, 64, 64
 base_dim = 64
 n_visits = 12
 T = 1000
-TRAIN_STEPS = 1000
+TRAIN_STEPS = 5000
 total_start = time.perf_counter()
 
 def make_circle_frame(pos_x, radius, H=32, W=32):
@@ -54,7 +54,7 @@ model = RDDIM(
     gru_n_layers=6,
     n_res_blocks=3,
     T=T,
-    eta=0.5,
+    eta=1.0,
     beta_schedule="Linear"
 )
 print("Model instantiated.")
