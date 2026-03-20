@@ -52,8 +52,10 @@ class RDDPM(nn.Module):
 
     def q_sample(self, x0, t):
         noise = torch.randn_like(x0)
-        sqrt_alpha_bar = self.sqrt_alpha_bar
-        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alpha_bar
+        device = x0.device
+        sqrt_alpha_bar = self.sqrt_alpha_bar.to(device)
+        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alpha_bar.to(device)
+        t = t.to(device)
         return sqrt_alpha_bar[t].view(-1, 1, 1, 1) * x0 + sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1) * noise, noise
     
     def p_sample(self, xt, dt, lt, h_prev=None):
@@ -88,11 +90,17 @@ class RDDPM(nn.Module):
     def train_step(self, x0_seq, lt_seq):
         h = None
         total_loss = 0
+        device = next(self.model.parameters()).device
         for x0, lt in zip(x0_seq, lt_seq):
-            x0 = x0
-            dt = torch.randint(0, self.T, (x0.size(0),))
-            lt = lt.expand(x0.size(0))
+            x0 = x0.to(device)
+            dt = torch.randint(0, self.T, (x0.size(0),), device=device)
+            lt = lt.expand(x0.size(0)).to(device)
             xt, noise = self.q_sample(x0, dt)
+            if h is not None:
+                if isinstance(h, list):
+                    h = [hi.to(device) for hi in h]
+                else:
+                    h = h.to(device)
             pred_noise, h = self.model(xt, dt, lt, h)
             if h is not None:
                 if isinstance(h, list):
