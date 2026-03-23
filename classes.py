@@ -14,7 +14,12 @@ class SinPositionalEmbedding(nn.Module):
 
     def forward(self, t):
         half_dim = self.dim // 2
-        emb = torch.exp(torch.arange(half_dim) * -(torch.log(torch.tensor(10000.0)) / half_dim))
+        device = t.device
+        dtype = t.dtype
+        emb = torch.exp(
+            torch.arange(half_dim, device=device, dtype=dtype) *
+            -(torch.log(torch.tensor(10000.0, device=device, dtype=dtype)) / half_dim)
+        )
         emb = t[:, None] * emb[None, :]
         return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
 
@@ -184,7 +189,7 @@ class LongitudinalMRIDataset:
         print(f"Dataset: {len(self.sessions)} sessions, {len(sequences)} channels "
               f"({', '.join(sequences)})")
 
-    def __call__(self):
+    def __call__(self, device=None):
         import nibabel as nib
         frames = []
         for _, row in self.sessions.iterrows():
@@ -205,8 +210,12 @@ class LongitudinalMRIDataset:
                 channels.append(np.zeros((H, W), dtype=np.float32))
             arr = np.stack(channels, axis=0)
             t = torch.from_numpy(arr).unsqueeze(0)
+            if device is not None:
+                t = t.to(device)
             frames.append(t)
         lt_seq = torch.arange(len(frames), dtype=torch.long)
+        if device is not None:
+            lt_seq = lt_seq.to(device)
         return frames, lt_seq
     
     def __len__(self):

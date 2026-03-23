@@ -46,7 +46,7 @@ def load_nifti_slice(path: Path, slice_axis: int, slice_idx: int,
 
 def load_session_tensor(row: pd.Series, data_root: Path,
                         sequences: list, slice_axis: int,
-                        slice_idx: int, target_hw: tuple) -> torch.Tensor:
+                        slice_idx: int, target_hw: tuple, device=None) -> torch.Tensor:
     """
     Load all requested sequences for one session.
     Returns tensor of shape (1, C, H, W)  where C = len(sequences).
@@ -65,50 +65,79 @@ def load_session_tensor(row: pd.Series, data_root: Path,
         channels.append(np.zeros((H, W), dtype=np.float32))
 
     arr = np.stack(channels, axis=0)
-    return torch.from_numpy(arr).unsqueeze(0)
+    t = torch.from_numpy(arr).unsqueeze(0)
+    if device is not None:
+        t = t.to(device)
+    return t
 
 def sample_and_save(model, gt_frames, lt_seq, img_size, sequences, out_dir, T):
     B = 1
     C = len(sequences)
-    H = W = img_size
+    if isinstance(img_size, (tuple, list)):
+        H, W = img_size
+    else:
+        H = W = img_size
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    device = next(model.parameters()).device if hasattr(model, 'parameters') else torch.device('cpu')
     with torch.no_grad():
-        gen = model.sample(shape=(B, C, H, W), T=T, lt_seq=lt_seq)
+        gen = model.sample(shape=(B, C, H, W), T=T, lt_seq=lt_seq, device=device)
 
-    n_visits = len(gt_frames)
-    n_rows = C * 2   # GT row + Gen row per channel
-
-    fig, axes = plt.subplots(n_rows, n_visits,
-                             figsize=(n_visits * 1.8, n_rows * 1.8))
-    if n_visits == 1:
-        axes = axes[:, np.newaxis]
-
-    for c_idx, seq_name in enumerate(sequences):
-        row_gt  = c_idx * 2
-        row_gen = c_idx * 2 + 1
-
-        for v in range(n_visits):
-            # Ground truth
-            gt_img = gt_frames[v][0, c_idx].cpu().numpy()
-            axes[row_gt, v].imshow(gt_img, cmap='gray', vmin=-1, vmax=1)
-            axes[row_gt, v].axis('off')
-            if v == 0:
-                axes[row_gt, v].set_ylabel(f'GT {seq_name}', fontsize=7)
-            if row_gt == 0:
-                axes[row_gt, v].set_title(f'v{v}', fontsize=7)
-
-            # Generated
-            gen_img = gen[v][0, c_idx].cpu().numpy()
-            axes[row_gen, v].imshow(gen_img, cmap='gray', vmin=-1, vmax=1)
-            axes[row_gen, v].axis('off')
-            if v == 0:
-                axes[row_gen, v].set_ylabel(f'Gen {seq_name}', fontsize=7)
-
-    plt.suptitle('RDDIM — Ground Truth vs Generated (MRI)', fontsize=10)
-    plt.tight_layout()
-    grid_path = out_dir / 'sample_grid.png'
-    plt.savefig(grid_path, dpi=150)
-    plt.close()
-    print(f"Saved sample grid → {grid_path}")
+    if gt_frames is None or (isinstance(gt_frames, (list, tuple)) and len(gt_frames) == 0):
+        # Only generate images, no GT comparison
+        n_visits = len(gen)
+        fig, axes = plt.subplots(C, n_visits, figsize=(n_visits * 1.8, C * 1.8))
+        if n_visits == 1:
+            axes = axes[:, np.newaxis]
+        for c_idx, seq_name in enumerate(sequences):
+            for v in range(n_visits):
+                gen_img = gen[v][0, c_idx].cpu().numpy()
+                axes[c_idx, v].imshow(gen_img, cmap='gray', vmin=-1, vmax=1)
+                axes[c_idx, v].axis('off')
+                if v == 0:
+                    axes[c_idx, v].set_ylabel(f'{seq_name}', fontsize=7)
+                if c_idx == 0:
+                    axes[c_idx, v].set_title(f'v{v}', fontsize=7)
+        plt.suptitle('RDDIM — Generated MRI', fontsize=10)
+        plt.tight_layout()
+        grid_path = out_dir / 'sample_grid.png'
+        jpg_path = out_dir / 'samples.jpg'
+        plt.savefig(grid_path, dpi=150)
+        plt.savefig(jpg_path, dpi=150, format='jpg')
+        plt.close()
+        print(f"Saved generated grid → {grid_path}")
+        print(f"Saved generated grid as JPEG → {jpg_path}")
+    else:
+        n_visits = len(gt_frames)
+        n_rows = C * 2   # GT row + Gen row per channel
+        fig, axes = plt.subplots(n_rows, n_visits, figsize=(n_visits * 1.8, n_rows * 1.8))
+        if n_visits == 1:
+            axes = axes[:, np.newaxis]
+        for c_idx, seq_name in enumerate(sequences):
+            row_gt  = c_idx * 2
+            row_gen = c_idx * 2 + 1
+            for v in range(n_visits):
+                # Ground truth
+                gt_img = gt_frames[v][0, c_idx].cpu().numpy()
+                axes[row_gt, v].imshow(gt_img, cmap='gray', vmin=-1, vmax=1)
+                axes[row_gt, v].axis('off')
+                if v == 0:
+                    axes[row_gt, v].set_ylabel(f'GT {seq_name}', fontsize=7)
+                if row_gt == 0:
+                    axes[row_gt, v].set_title(f'v{v}', fontsize=7)
+                # Generated
+                gen_img = gen[v][0, c_idx].cpu().numpy()
+                axes[row_gen, v].imshow(gen_img, cmap='gray', vmin=-1, vmax=1)
+                axes[row_gen, v].axis('off')
+                if v == 0:
+                    axes[row_gen, v].set_ylabel(f'Gen {seq_name}', fontsize=7)
+        plt.suptitle('RDDIM — Ground Truth vs Generated (MRI)', fontsize=10)
+        plt.tight_layout()
+        grid_path = out_dir / 'sample_grid.png'
+        jpg_path = out_dir / 'samples.jpg'
+        plt.savefig(grid_path, dpi=150)
+        plt.savefig(jpg_path, dpi=150, format='jpg')
+        plt.close()
+        print(f"Saved sample grid → {grid_path}")
+        print(f"Saved sample grid as JPEG → {jpg_path}")

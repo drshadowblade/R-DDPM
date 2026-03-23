@@ -21,6 +21,9 @@ class RUnet(UNet):
         )
         self.emb_proj = nn.Linear(base_dim * 2, base_dim)
     def forward(self, x, dt, lt, h_prev = None):
+        device = x.device
+        dt = dt.to(device)
+        lt = lt.to(device)
         time_emb = self.time_mlp(dt.float())
         long_emb = self.long_mlp(lt.float())
         emb = torch.cat([time_emb, long_emb], dim=-1)
@@ -50,52 +53,61 @@ class RDDPM(nn.Module):
         self.sqrt_beta = torch.sqrt(self.beta)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr = 1e-4)
 
-    def q_sample(self, x0, t):
-        noise = torch.randn_like(x0)
-        device = x0.device
+    def q_sample(self, x0, t, device=None):
+        if device is None:
+            device = x0.device
+        noise = torch.randn_like(x0, device=device)
         sqrt_alpha_bar = self.sqrt_alpha_bar.to(device)
         sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alpha_bar.to(device)
         t = t.to(device)
         return sqrt_alpha_bar[t].view(-1, 1, 1, 1) * x0 + sqrt_one_minus_alpha_bar[t].view(-1, 1, 1, 1) * noise, noise
     
-    def p_sample(self, xt, dt, lt, h_prev=None):
+    def p_sample(self, xt, dt, lt, h_prev=None, device=None):
+        if device is None:
+            device = xt.device
         if not isinstance(dt, torch.Tensor):
-            dt = torch.full((xt.size(0),), dt, dtype=torch.long)
+            dt = torch.full((xt.size(0),), dt, dtype=torch.long, device=device)
         else:
-            dt = dt
+            dt = dt.to(device)
         if not isinstance(lt, torch.Tensor):
-            lt = torch.full((xt.size(0),), lt, dtype=torch.long)
+            lt = torch.full((xt.size(0),), lt, dtype=torch.long, device=device)
         else:
-            lt = lt
+            lt = lt.to(device)
         pred_noise, h = self.model(xt, dt, lt, h_prev)
         mean = (
-            1 / torch.sqrt(self.alpha[dt]).view(-1, 1, 1, 1) *
-            (xt - (self.beta[dt] / self.sqrt_one_minus_alpha_bar[dt]).view(-1, 1, 1, 1) * pred_noise)
+            1 / torch.sqrt(self.alpha[dt].to(device)).view(-1, 1, 1, 1) *
+            (xt - (self.beta[dt].to(device) / self.sqrt_one_minus_alpha_bar[dt].to(device)).view(-1, 1, 1, 1) * pred_noise)
         )
-        noise = torch.randn_like(xt)
+        noise = torch.randn_like(xt, device=device)
         mask = (dt > 0).float().view(-1, 1, 1, 1)
-        return mean + mask * self.sqrt_beta[dt].view(-1, 1, 1, 1) * noise, h
+        return mean + mask * self.sqrt_beta[dt].to(device).view(-1, 1, 1, 1) * noise, h
     
-    def sample(self, shape, T, lt_seq):
+    def sample(self, shape, T, lt_seq, device=None):
         h = None
         outputs = []
+        if device is None:
+            device = next(self.model.parameters()).device
         for lt in lt_seq:
-            xt = torch.randn(shape)
-            lt = lt.expand(shape[0])
+            xt = torch.randn(shape, device=device)
+            lt = lt.expand(shape[0]).to(device)
             for t in reversed(range(T)):
-                xt, h_new = self.p_sample(xt, t, lt, h_prev=h)
+                xt, h_new = self.p_sample(xt, t, lt, h_prev=h, device=device)
             h = h_new
-            outputs.append(xt)
+            # Move each output to CPU immediately to free CUDA memory
+            outputs.append(xt.detach().cpu())
+            del xt
+            torch.cuda.empty_cache()
         return outputs
-    def train_step(self, x0_seq, lt_seq):
+    def train_step(self, x0_seq, lt_seq, device=None):
         h = None
         total_loss = 0
-        device = next(self.model.parameters()).device
+        if device is None:
+            device = next(self.model.parameters()).device
         for x0, lt in zip(x0_seq, lt_seq):
             x0 = x0.to(device)
             dt = torch.randint(0, self.T, (x0.size(0),), device=device)
             lt = lt.expand(x0.size(0)).to(device)
-            xt, noise = self.q_sample(x0, dt)
+            xt, noise = self.q_sample(x0, dt, device=device)
             if h is not None:
                 if isinstance(h, list):
                     h = [hi.to(device) for hi in h]
@@ -122,52 +134,62 @@ class RDDIM(RDDPM):
         self.sqrt_alpha_bar = torch.sqrt(self.alpha_bar)
         self.sqrt_one_minus_alpha_bar = torch.sqrt(1.0 - self.alpha_bar)
 
-    def p_sample(self, xt, dt, lt, h_prev=None):
+    def p_sample(self, xt, dt, lt, h_prev=None, device=None):
+
+        if device is None:
+            device = xt.device
         if not isinstance(dt, torch.Tensor):
             dt = torch.full((xt.size(0),), dt, dtype=torch.long)
         else:
             dt = dt.long()
+        dt = dt.to(self.sqrt_alpha_bar.device)  # Ensure dt is on the same device as sqrt_alpha_bar
         if not isinstance(lt, torch.Tensor):
-            lt = torch.full((xt.size(0),), lt, dtype=torch.long)
+            lt = torch.full((xt.size(0),), lt, dtype=torch.long, device=device)
         else:
-            lt = lt.long()
+            lt = lt.long().to(device)
 
         pred_noise, h = self.model(xt, dt, lt, h_prev)
 
-        sqrt_alpha_bar_t = self.sqrt_alpha_bar[dt].view(-1,1,1,1)
-        sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alpha_bar[dt].view(-1,1,1,1)
+        sqrt_alpha_bar_t = self.sqrt_alpha_bar[dt].to(device).view(-1,1,1,1)
+        sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alpha_bar[dt].to(device).view(-1,1,1,1)
 
         x0_pred = (xt - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-8)
 
         prev_idx = (dt - 1).clamp(min=0)
-        sqrt_alpha_bar_prev = self.sqrt_alpha_bar[prev_idx].view(-1,1,1,1)
-        sqrt_one_minus_alpha_bar_prev = self.sqrt_one_minus_alpha_bar[prev_idx].view(-1,1,1,1)
-        alpha_bar_t = self.alpha_bar[dt].view(-1,1,1,1)
-        alpha_bar_prev = self.alpha_bar[prev_idx].view(-1,1,1,1)
+        sqrt_alpha_bar_prev = self.sqrt_alpha_bar[prev_idx].to(device).view(-1,1,1,1)
+        sqrt_one_minus_alpha_bar_prev = self.sqrt_one_minus_alpha_bar[prev_idx].to(device).view(-1,1,1,1)
+        alpha_bar_t = self.alpha_bar[dt].to(device).view(-1,1,1,1)
+        alpha_bar_prev = self.alpha_bar[prev_idx].to(device).view(-1,1,1,1)
 
         eta = float(self.eta)
         if eta == 0.0:
             x_prev_det = sqrt_alpha_bar_prev * x0_pred + sqrt_one_minus_alpha_bar_prev * pred_noise
-            mask = (dt > 0).float().view(-1,1,1,1)
+            mask = (dt > 0).float().view(-1,1,1,1).to(device)
+            x_prev_det = x_prev_det.to(device)
+            x0_pred = x0_pred.to(device)
             x_prev = mask * x_prev_det + (1 - mask) * x0_pred
             return x_prev, h
         else:
             sigma = eta * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar_t)) * torch.sqrt(torch.clamp(1 - alpha_bar_t / (alpha_bar_prev + 1e-8), min=0.0))
-            noise = torch.randn_like(xt)
+            noise = torch.randn_like(xt, device=device)
             nonzero_term = torch.sqrt(torch.clamp(1 - alpha_bar_prev - sigma**2, min=0.0)) * pred_noise
             x_prev = sqrt_alpha_bar_prev * x0_pred + nonzero_term + sigma * noise
             mask = (dt > 0).float().view(-1,1,1,1)
             x_prev = mask * x_prev + (1 - mask) * x0_pred
             return x_prev, h
 
-    def sample(self, shape, T, lt_seq):
+    def sample(self, shape, T, lt_seq, device=None):
         h = None
         outputs = []
+        if device is None:
+            device = next(self.model.parameters()).device
         for lt in lt_seq:
-            xt = torch.randn(shape)
-            lt = lt.expand(shape[0])
+            xt = torch.randn(shape, device=device)
+            lt = lt.expand(shape[0]).to(device)
             for t in reversed(range(T)):
-                xt, h_new = self.p_sample(xt, t, lt, h_prev=h)
+                xt, h_new = self.p_sample(xt, t, lt, h_prev=h, device=device)
             h = h_new
-            outputs.append(xt)
+            outputs.append(xt.detach().cpu())
+            del xt
+            torch.cuda.empty_cache()
         return outputs
