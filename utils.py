@@ -1,76 +1,39 @@
 import torch
 import pandas as pd
 import numpy as np
-import nibabel as nib
 from pathlib import Path
+from PIL import Image
 from matplotlib import pyplot as plt
 
-def cosine_beta_schedule(T, s=0.008):
-    steps = T + 1
-    x = torch.linspace(0, T, steps)
-    alphas_cumprod = torch.cos(((x / T) + s) / (1 + s) * torch.pi * 0.5) ** 2
+def cosine_beta_schedule(timesteps, s=0.008):
+    steps = timesteps + 1
+    x = torch.linspace(0, timesteps, steps)
+    alphas_cumprod = torch.cos(((x / steps) + s) / (1 + s) * torch.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    beta = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(beta, 1e-4, 0.999)
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0.0001, 0.9999)
 
-def load_nifti_slice(path: Path, slice_axis: int, slice_idx: int,
-                     target_hw: tuple) -> np.ndarray:
+def load_session_tensor(row: pd.Series, data_root: Path, seqs: list, hw: tuple) -> torch.Tensor:
     """
-    Load one 2-D slice from a 3-D NIfTI volume.
-    Returns float32 array of shape (H, W), z-score normalised to [-1, 1].
+    Load one session row → tensor of shape (1, C, H, W) in [-1, 1].
     """
-    img = nib.load(str(path))
-    vol = img.get_fdata(dtype=np.float32)
+    frames = []
+    for seq in seqs:
+        img_path = data_root / row[seq]
+        img = plt.imread(img_path)
+        if img.ndim == 3:
+            img = img[..., 0]  # Convert RGBA to grayscale if needed
+        img_resized = np.array(Image.fromarray(img).resize((hw[1], hw[0]), resample=Image.BILINEAR))
+        frames.append(img_resized)
+    tensor = torch.from_numpy(np.stack(frames)).unsqueeze(0).float()  # (1, C, H, W)
+    tensor = (tensor / 127.5) - 1.0  # Rescale to [-1, 1]
+    return tensor
 
-    # Extract slice
-    if slice_axis == 0:
-        sl = vol[slice_idx, :, :]
-    elif slice_axis == 1:
-        sl = vol[:, slice_idx, :]
-    else:
-        sl = vol[:, :, slice_idx]
-
-    # Resize to target spatial size if needed
-    H, W = target_hw
-    if sl.shape != (H, W):
-        from PIL import Image as PILImage
-        pil = PILImage.fromarray(sl).resize((W, H), PILImage.BILINEAR)
-        sl = np.array(pil, dtype=np.float32)
-
-    # Z-score then clip to [-1, 1]  (same range as your synthetic test)
-    std = sl.std()
-    if std > 1e-6:
-        sl = (sl - sl.mean()) / std
-    sl = np.clip(sl, -3, 3) / 3.0   # now in [-1, 1]
-    return sl
-
-def load_session_tensor(row: pd.Series, data_root: Path,
-                        sequences: list, slice_axis: int,
-                        slice_idx: int, target_hw: tuple, device=None) -> torch.Tensor:
+def sample_and_save(model, gt_frames, lt_seq, img_size, sequences, out_dir, T, compare=True, pre_images=None, pre_times=None):
     """
-    Load all requested sequences for one session.
-    Returns tensor of shape (1, C, H, W)  where C = len(sequences).
-    Missing sequences are filled with zeros.
+    Generate and save samples. If compare is True, display comparison with ground truth in a grid.
+    If compare is False, do not expect GT images and save each generated image as a separate file.
     """
-    H, W = target_hw
-    channels = []
-    for seq in sequences:
-        fname = row.get(seq)
-        if fname and pd.notna(fname):
-            fpath = data_root / fname
-            if fpath.exists():
-                sl = load_nifti_slice(fpath, slice_axis, slice_idx, target_hw)
-                channels.append(sl)
-                continue
-        channels.append(np.zeros((H, W), dtype=np.float32))
-
-    arr = np.stack(channels, axis=0)
-    t = torch.from_numpy(arr).unsqueeze(0)
-    if device is not None:
-        t = t.to(device)
-    return t
-
-def sample_and_save(model, gt_frames, lt_seq, img_size, sequences, out_dir, T):
     B = 1
     C = len(sequences)
     if isinstance(img_size, (tuple, list)):
@@ -82,33 +45,12 @@ def sample_and_save(model, gt_frames, lt_seq, img_size, sequences, out_dir, T):
 
     device = next(model.parameters()).device if hasattr(model, 'parameters') else torch.device('cpu')
     with torch.no_grad():
-        gen = model.sample(shape=(B, C, H, W), T=T, lt_seq=lt_seq, device=device)
+        gen = model.sample(shape=(B, C, H, W), T=T, lt_seq=lt_seq, pre_images=pre_images, pre_times=pre_times, device=device)
 
-    if gt_frames is None or (isinstance(gt_frames, (list, tuple)) and len(gt_frames) == 0):
-        # Only generate images, no GT comparison
-        n_visits = len(gen)
-        fig, axes = plt.subplots(C, n_visits, figsize=(n_visits * 1.8, C * 1.8))
-        if n_visits == 1:
-            axes = axes[:, np.newaxis]
-        for c_idx, seq_name in enumerate(sequences):
-            for v in range(n_visits):
-                gen_img = gen[v][0, c_idx].cpu().numpy()
-                axes[c_idx, v].imshow(gen_img, cmap='gray', vmin=-1, vmax=1)
-                axes[c_idx, v].axis('off')
-                if v == 0:
-                    axes[c_idx, v].set_ylabel(f'{seq_name}', fontsize=7)
-                if c_idx == 0:
-                    axes[c_idx, v].set_title(f'v{v}', fontsize=7)
-        plt.suptitle('RDDIM — Generated MRI', fontsize=10)
-        plt.tight_layout()
-        grid_path = out_dir / 'sample_grid.png'
-        jpg_path = out_dir / 'samples.jpg'
-        plt.savefig(grid_path, dpi=150)
-        plt.savefig(jpg_path, dpi=150, format='jpg')
-        plt.close()
-        print(f"Saved generated grid → {grid_path}")
-        print(f"Saved generated grid as JPEG → {jpg_path}")
-    else:
+    if compare:
+        if gt_frames is None or (isinstance(gt_frames, (list, tuple)) and len(gt_frames) == 0):
+            print("No ground truth frames provided for comparison.")
+            return
         n_visits = len(gt_frames)
         n_rows = C * 2   # GT row + Gen row per channel
         fig, axes = plt.subplots(n_rows, n_visits, figsize=(n_visits * 1.8, n_rows * 1.8))
@@ -141,3 +83,15 @@ def sample_and_save(model, gt_frames, lt_seq, img_size, sequences, out_dir, T):
         plt.close()
         print(f"Saved sample grid → {grid_path}")
         print(f"Saved sample grid as JPEG → {jpg_path}")
+    else:
+        n_visits = len(gen)
+        for v in range(n_visits):
+            for c_idx, seq_name in enumerate(sequences):
+                gen_img = gen[v][0, c_idx].cpu().numpy()
+                # Rescale from [-1, 1] to [0, 255] for saving
+                img_uint8 = ((gen_img + 1) * 127.5).clip(0, 255).astype(np.uint8)
+                from PIL import Image
+                im = Image.fromarray(img_uint8)
+                fname = out_dir / f'gen_{seq_name}_v{v}.png'
+                im.save(fname)
+                print(f"Saved generated image → {fname}")

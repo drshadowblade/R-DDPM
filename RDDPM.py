@@ -20,6 +20,19 @@ class RUnet(UNet):
             nn.Linear(base_dim * 4, base_dim)
         )
         self.emb_proj = nn.Linear(base_dim * 2, base_dim)
+
+    def get_hidden_state(self, x, t, h_prev=None):
+        # t: tensor of shape (batch,) or scalar
+        if not torch.is_tensor(t):
+            t = torch.full((x.size(0),), t, device=x.device)
+        else:
+            t = t.to(x.device)
+        time_emb = self.time_mlp(t)
+        _, _, d3 = self.encode(x, time_emb)
+        attn_out = self.spatial_attention(d3)
+        upd_hidden = self.gru(attn_out, h_prev)
+        return upd_hidden
+
     def forward(self, x, dt, lt, h_prev = None):
         device = x.device
         dt = dt.to(device)
@@ -82,8 +95,13 @@ class RDDPM(nn.Module):
         mask = (dt > 0).float().view(-1, 1, 1, 1)
         return mean + mask * self.sqrt_beta[dt].to(device).view(-1, 1, 1, 1) * noise, h
     
-    def sample(self, shape, T, lt_seq, device=None):
+    def sample(self, shape, T, lt_seq, pre_images=None, pre_times=None, device=None):
         h = None
+        if pre_images is not None:
+            if pre_times is None:
+                pre_times = list(range(len(pre_images)))
+            for img in pre_images:
+                h = self.model.get_hidden_state(img.to(device), h_prev=h)
         outputs = []
         if device is None:
             device = next(self.model.parameters()).device
@@ -178,8 +196,13 @@ class RDDIM(RDDPM):
             x_prev = mask * x_prev + (1 - mask) * x0_pred
             return x_prev, h
 
-    def sample(self, shape, T, lt_seq, device=None):
+    def sample(self, shape, T, lt_seq, pre_images=None, device=None, pre_times=None):
         h = None
+        if pre_images is not None:
+            if pre_times is None:
+                pre_times = list(range(len(pre_images)))
+            for img, t in zip(pre_images, pre_times):
+                h = self.model.get_hidden_state(img.to(device), t, h_prev=h)
         outputs = []
         if device is None:
             device = next(self.model.parameters()).device
