@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import time
-from RDDPM import RDDIM
+from RDDPM import RDDPM
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 torch.set_default_device(device)
@@ -47,14 +47,13 @@ seq_build_elapsed = time.perf_counter() - seq_build_start
 print(f"Built sequences in {seq_build_elapsed:.3f}s")
 lt_seq = torch.arange(n_visits, dtype=torch.long)
 
-model = RDDIM(
+model = RDDPM(
     input_size=(H, W),
     n_channels=C,
     base_dim=base_dim,
     gru_n_layers=6,
     n_res_blocks=3,
     T=T,
-    eta=1.0,
     beta_schedule="Linear"
 )
 print("Model instantiated.")

@@ -2,14 +2,14 @@ import torch
 from pathlib import Path
 import pandas as pd
 from utils import load_session_tensor, sample_and_save
-from RDDPM import RDDPM, RDDIM
+from RDDPM import RDDPM
 
 # ==== CONSTANTS (replace args) ====
-CHECKPOINT = 'checkpoints/latest.pth'  # Path to model checkpoint
+CHECKPOINT = 'checkpoints/200.pth'  # Path to model checkpoint
 DATA_PATH = 'training_data/'  # Path to training data
 PATIENT_ID = 'P001'  # Patient ID
-N_INPUT = 3  # Number of initial images to use
-OUT_DIR = 'output_predict/'  # Output directory
+N_INPUT = 10  # Number of initial images to use
+OUT_DIR = 'output/predict'  # Output directory
 T_STEPS = 1000  # Diffusion steps
 # ==== END CONSTANTS ====
 
@@ -21,17 +21,16 @@ session_table = session_table.sort_values('session_date').reset_index(drop=True)
 
 data_root = Path(DATA_PATH)
 
-ckpt = torch.load(CHECKPOINT, map_location='cpu')
-model = RDDIM(
+ckpt = torch.load(CHECKPOINT, map_location='cuda')
+model = RDDPM(
     input_size=ckpt['hyperparams']['size'],
     n_channels=len(ckpt['hyperparams']['sequences']),
     base_dim=ckpt['hyperparams']['base_dim'],
     gru_n_layers=ckpt['hyperparams']['gru_layers'],
     n_res_blocks=ckpt['hyperparams']['res_blocks'],
     T=ckpt['hyperparams']['T'],
-    eta=ckpt['hyperparams']['eta'],
     beta_schedule=ckpt['hyperparams']['beta_schedule']
-)
+).to('cuda')
 frames = [
     load_session_tensor(row, data_root, ckpt['hyperparams']['sequences'], ckpt['hyperparams']['size'])
     for _, row in session_table.iterrows()

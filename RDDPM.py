@@ -87,21 +87,26 @@ class RDDPM(nn.Module):
         else:
             lt = lt.to(device)
         pred_noise, h = self.model(xt, dt, lt, h_prev)
+        # Move tensors to the correct device before indexing
+        alpha = self.alpha.to(device)[dt]
+        beta = self.beta.to(device)[dt]
+        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alpha_bar.to(device)[dt]
+        sqrt_beta = self.sqrt_beta.to(device)[dt]
         mean = (
-            1 / torch.sqrt(self.alpha[dt].to(device)).view(-1, 1, 1, 1) *
-            (xt - (self.beta[dt].to(device) / self.sqrt_one_minus_alpha_bar[dt].to(device)).view(-1, 1, 1, 1) * pred_noise)
+            1 / torch.sqrt(alpha).view(-1, 1, 1, 1) *
+            (xt - (beta / sqrt_one_minus_alpha_bar).view(-1, 1, 1, 1) * pred_noise)
         )
         noise = torch.randn_like(xt, device=device)
         mask = (dt > 0).float().view(-1, 1, 1, 1)
-        return mean + mask * self.sqrt_beta[dt].to(device).view(-1, 1, 1, 1) * noise, h
+        return mean + mask * sqrt_beta.view(-1, 1, 1, 1) * noise, h
     
     def sample(self, shape, T, lt_seq, pre_images=None, pre_times=None, device=None):
         h = None
         if pre_images is not None:
             if pre_times is None:
                 pre_times = list(range(len(pre_images)))
-            for img in pre_images:
-                h = self.model.get_hidden_state(img.to(device), h_prev=h)
+            for img, t in zip(pre_images, pre_times):
+                h = self.model.get_hidden_state(img.to(device), t, h_prev=h)
         outputs = []
         if device is None:
             device = next(self.model.parameters()).device

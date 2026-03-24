@@ -33,18 +33,17 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from RDDPM import RDDIM
+from RDDPM import RDDPM
 from utils import sample_and_save
 
 
 sequences       = ['FLAIR', 'POST', 'PRE', 'T2']
 BASE_DIM        = 128
-GRU_LAYERS      = 2
-RES_BLOCKS      = 1
+GRU_LAYERS      = 3
+RES_BLOCKS      = 2
 T               = 1000
-ETA             = 0.0
 BETA_SCHEDULE   = 'linear'
-EPOCHS          = 1000
+EPOCHS          = 5000
 LEARNING_RATE   = 1e-4
 DEVICE          = 'cuda'
 data_path       = 'training_data/'
@@ -100,7 +99,7 @@ frames = [
 n_visits = len(frames)
 
 # lt_seq: integer indices 0 … n_visits-1, shape (n_visits,)
-# This is the longitudinal time index tensor used by RDDIM.train_step
+# This is the longitudinal time index tensor used by RDDPM.train_step
 lt_seq = torch.arange(n_visits, dtype=torch.long)
 
 print(f"\nDataset loaded: {n_visits} visits")
@@ -110,14 +109,13 @@ print(f"Sequences:      {sequences}")
 # ---------------------------------------------------------------------------
 # ── Model ────────────────────────────────────────────────────────────────
 # ---------------------------------------------------------------------------
-model = RDDIM(
+model = RDDPM(
     input_size=(H, W),
     n_channels=len(sequences),
     base_dim=BASE_DIM,
     gru_n_layers=GRU_LAYERS,
     n_res_blocks=RES_BLOCKS,
     T=T,
-    eta=ETA,
     beta_schedule=BETA_SCHEDULE,
 )
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -200,7 +198,6 @@ try:
                     'gru_layers': GRU_LAYERS,
                     'res_blocks': RES_BLOCKS,
                     'T': T,
-                    'eta': ETA,
                     'beta_schedule': BETA_SCHEDULE,
                     'size': (H, W),
                     'sequences': sequences,
@@ -220,7 +217,6 @@ torch.save({
         'gru_layers': GRU_LAYERS,
         'res_blocks': RES_BLOCKS,
         'T': T,
-        'eta': ETA,
         'beta_schedule': BETA_SCHEDULE,
         'size': (H, W),
         'sequences': sequences,
