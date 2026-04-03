@@ -2,11 +2,20 @@ from classes import UNet, SinPositionalEmbedding
 from convgru.convgru import ConvGRU
 import torch
 from torch import nn
-from utils import cosine_beta_schedule
+import torch.nn.functional as F
+
+def cosine_beta_schedule(timesteps, s=0.008):
+    steps = timesteps + 1
+    x = torch.linspace(0, timesteps, steps)
+    alphas_cumprod = torch.cos(((x / steps) + s) / (1 + s) * torch.pi * 0.5) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0.0001, 0.9999)
 
 class RUnet(UNet):
-    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 2, n_heads=8, n_res_blocks=1):
+    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 3, n_heads=8, n_res_blocks=1):
         super(RUnet, self).__init__(n_channels, base_dim, n_heads, n_res_blocks)   
+        self.gru_n_layers = gru_n_layers
         self.gru = ConvGRU(
             input_size=base_dim * 4,
             hidden_sizes=base_dim * 4,
@@ -19,14 +28,18 @@ class RUnet(UNet):
             nn.SiLU(),
             nn.Linear(base_dim * 4, base_dim)
         )
-        self.emb_proj = nn.Linear(base_dim * 2, base_dim)
+        self.film_embeds = nn.Sequential(
+            nn.Linear(base_dim, base_dim * 4),
+            nn.SiLU(),
+            nn.Linear(base_dim * 4, base_dim * 2)
+        )
+        self.film_memory = nn.Conv2d(base_dim* 4, base_dim*8, 1)
 
     def get_hidden_state(self, x, t, h_prev=None):
-        # t: tensor of shape (batch,) or scalar
         if not torch.is_tensor(t):
-            t = torch.full((x.size(0),), t, device=x.device)
+            t = torch.full((x.size(0),), t, device=x.device, dtype=torch.float32)
         else:
-            t = t.to(x.device)
+            t = t.to(x.device).float()
         time_emb = self.time_mlp(t)
         _, _, d3 = self.encode(x, time_emb)
         attn_out = self.spatial_attention(d3)
@@ -39,20 +52,20 @@ class RUnet(UNet):
         lt = lt.to(device)
         time_emb = self.time_mlp(dt.float())
         long_emb = self.long_mlp(lt.float())
-        emb = torch.cat([time_emb, long_emb], dim=-1)
-        emb = self.emb_proj(emb)
+        scale, shift = self.film_embeds(long_emb).chunk(2, 1)
+        emb = time_emb * (1 + scale) + shift
         d1, d2, d3 = self.encode(x, emb)
         attn_out = self.spatial_attention(d3)
         upd_hidden = self.gru(attn_out, h_prev)
         h = upd_hidden
         h_last = h[-1] if isinstance(h, list) else h
-        gate = torch.sigmoid(h_last)
-        drop = attn_out * (1 + gate)
+        scale, shift = self.film_memory(h_last).chunk(2, 1)
+        drop = attn_out * (1 + scale) + shift
         out = self.decode(d1, d2, drop, emb)
         return out, h
     
 class RDDPM(nn.Module):
-    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 4, n_heads=8, n_res_blocks=1, beta_start =1e-4, beta_end=0.02, T=1000, beta_schedule='cosine'):
+    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 3, n_heads=8, n_res_blocks=1, beta_start =1e-4, beta_end=0.02, T=1000, beta_schedule='cosine'):
         super().__init__()
         self.T = T
         self.model = RUnet(input_size, n_channels, base_dim, gru_n_layers, n_heads, n_res_blocks)
@@ -101,6 +114,8 @@ class RDDPM(nn.Module):
         return mean + mask * sqrt_beta.view(-1, 1, 1, 1) * noise, h
     
     def sample(self, shape, T, lt_seq, pre_images=None, pre_times=None, device=None):
+        if device is None:
+            device = next(self.model.parameters()).device
         h = None
         if pre_images is not None:
             if pre_times is None:
@@ -108,8 +123,6 @@ class RDDPM(nn.Module):
             for img, t in zip(pre_images, pre_times):
                 h = self.model.get_hidden_state(img.to(device), t, h_prev=h)
         outputs = []
-        if device is None:
-            device = next(self.model.parameters()).device
         for lt in lt_seq:
             xt = torch.randn(shape, device=device)
             lt = lt.expand(shape[0]).to(device)
@@ -119,7 +132,8 @@ class RDDPM(nn.Module):
             # Move each output to CPU immediately to free CUDA memory
             outputs.append(xt.detach().cpu())
             del xt
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         return outputs
     def train_step(self, x0_seq, lt_seq, device=None):
         h = None
@@ -145,6 +159,7 @@ class RDDPM(nn.Module):
             total_loss += nn.MSELoss()(pred_noise, noise)
         self.optimizer.zero_grad()
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
         return total_loss.item()
 
@@ -202,6 +217,8 @@ class RDDIM(RDDPM):
             return x_prev, h
 
     def sample(self, shape, T, lt_seq, pre_images=None, device=None, pre_times=None):
+        if device is None:
+            device = next(self.model.parameters()).device
         h = None
         if pre_images is not None:
             if pre_times is None:
@@ -209,8 +226,6 @@ class RDDIM(RDDPM):
             for img, t in zip(pre_images, pre_times):
                 h = self.model.get_hidden_state(img.to(device), t, h_prev=h)
         outputs = []
-        if device is None:
-            device = next(self.model.parameters()).device
         for lt in lt_seq:
             xt = torch.randn(shape, device=device)
             lt = lt.expand(shape[0]).to(device)
@@ -219,5 +234,6 @@ class RDDIM(RDDPM):
             h = h_new
             outputs.append(xt.detach().cpu())
             del xt
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         return outputs

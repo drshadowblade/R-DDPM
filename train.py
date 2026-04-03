@@ -34,24 +34,25 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 from RDDPM import RDDPM
-from utils import sample_and_save
+from utils import generate
 
+torch.backends.cudnn.benchmark = True
 
 sequences       = ['FLAIR', 'POST', 'PRE', 'T2']
-BASE_DIM        = 128
-GRU_LAYERS      = 3
-RES_BLOCKS      = 2
-T               = 1000
-BETA_SCHEDULE   = 'linear'
-EPOCHS          = 5000
-LEARNING_RATE   = 1e-4
-DEVICE          = 'cuda'
-data_path       = 'training_data/'
-H = W           = 64
+BASE_DIM         = 64
+GRU_LAYERS       = 6
+RES_BLOCKS       = 3
+T                = 1000
+BETA_SCHEDULE    = 'linear'
+EPOCHS           = 10000
+LEARNING_RATE    = 1e-4
+H = W            = 96
+min_visits       = 5
 subsample_visits = True
-min_visits      = 3
-log_every       = 100
-save_every      = 100
+log_every        = 50
+save_every       = 200
+DEVICE          = 'cuda' if torch.cuda.is_available() else 'cpu'
+data_path       = 'training_data/'
 
 checkpoint_dir  = Path("./checkpoints")
 output_dir      = Path("./output")
@@ -89,6 +90,90 @@ def load_session_frame(row: pd.Series, data_root: Path, seqs: list, hw: tuple) -
 
     frame = torch.stack(channels, dim=0)   # (C, H, W)
     return frame.unsqueeze(0)              # (1, C, H, W)
+
+
+def _load_png_01(path: Path, hw: tuple) -> np.ndarray:
+    """Load PNG as float image in [0, 1] with fixed output size."""
+    img = Image.open(path).convert("L")
+    img = img.resize((hw[1], hw[0]), Image.BILINEAR)
+    return np.asarray(img, dtype=np.float32) / 255.0
+
+
+def _psnr(gt: np.ndarray, pred: np.ndarray) -> float:
+    mse = float(np.mean((gt - pred) ** 2))
+    if mse <= 1e-12:
+        return float("inf")
+    return float(20.0 * np.log10(1.0 / np.sqrt(mse)))
+
+
+def save_comparison_table(
+    generated_results: dict,
+    patient_sessions: pd.DataFrame,
+    data_root: Path,
+    seqs: list,
+    hw: tuple,
+    n_input: int,
+    out_csv: Path,
+    out_summary_csv: Path,
+):
+    """
+    Save per-frame GT-vs-generated comparison rows and per-sequence summary.
+    """
+    rows = []
+
+    for seq in seqs:
+        gen_paths = generated_results.get(seq, [])
+        for i, gen_path_str in enumerate(gen_paths):
+            visit_idx = n_input + i
+            session_date = ""
+            gt_path = None
+
+            if visit_idx < len(patient_sessions):
+                row = patient_sessions.iloc[visit_idx]
+                session_date = str(row.get("session_date", ""))
+                gt_rel = row.get(seq)
+                if isinstance(gt_rel, str) and gt_rel:
+                    gt_path = data_root / gt_rel
+
+            gen_path = Path(gen_path_str)
+            record = {
+                "visit_idx": visit_idx,
+                "session_date": session_date,
+                "sequence": seq,
+                "gt_path": str(gt_path) if gt_path is not None else "",
+                "gen_path": str(gen_path),
+                "mae": np.nan,
+                "mse": np.nan,
+                "psnr": np.nan,
+            }
+
+            if gt_path is not None and gt_path.exists() and gen_path.exists():
+                gt = _load_png_01(gt_path, hw)
+                pred = _load_png_01(gen_path, hw)
+                mae = float(np.mean(np.abs(gt - pred)))
+                mse = float(np.mean((gt - pred) ** 2))
+                record.update({
+                    "mae": mae,
+                    "mse": mse,
+                    "psnr": _psnr(gt, pred),
+                })
+
+            rows.append(record)
+
+    cmp_df = pd.DataFrame(rows)
+    cmp_df.to_csv(out_csv, index=False)
+
+    if not cmp_df.empty:
+        summary_df = (
+            cmp_df.groupby("sequence", as_index=False)[["mae", "mse", "psnr"]]
+            .mean(numeric_only=True)
+            .sort_values("sequence")
+        )
+    else:
+        summary_df = pd.DataFrame(columns=["sequence", "mae", "mse", "psnr"])
+    summary_df.to_csv(out_summary_csv, index=False)
+
+    return cmp_df, summary_df
 
 
 data_root = Path(data_path)
@@ -176,7 +261,8 @@ try:
         loss_history.append(loss)
 
         del sub_frames
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         epoch_elapsed = time.perf_counter() - epoch_start
 
@@ -186,7 +272,7 @@ try:
                   f"loss={loss:.4f}  avg50={avg_recent:.4f}  "
                   f"({epoch_elapsed:.2f}s/epoch)")
 
-        if loss < best_loss or epoch % save_every == 0:
+        if epoch % save_every == 0:
             if loss < best_loss:
                 best_loss = loss
             torch.save({
@@ -250,17 +336,57 @@ print(f"Saved loss curve → {loss_plot_path}")
 # ---------------------------------------------------------------------------
 print("\nSampling after training...")
 
-# Move frames back to CPU for sample_and_save (matches original train.py behaviour)
-frames_cpu = [f.cpu() for f in frames]
-lt_seq_cpu = lt_seq.cpu()
+PREDICT_PATIENT_ID = "P001"
+PREDICT_N_INPUT = min(5, n_visits)
+PREDICT_N_PREDICT = max(0, n_visits - PREDICT_N_INPUT)
 
-sample_and_save(
-    model=model,
-    sequences=sequences,
-    out_dir=output_dir,
-    img_size=(H, W),
-    T=T,
-    gt_frames=frames_cpu,
-    lt_seq=lt_seq_cpu,
-    compare=True,
+# Wrap the trained model in the generate() API format
+model_bundle = {
+    "model":     model,
+    "sequences": sequences,
+    "img_size":  (H, W),
+    "T":         T,
+    "device":    DEVICE,
+}
+
+results = generate(
+    model=model_bundle,
+    data_path=data_path,
+    patient_id=PREDICT_PATIENT_ID,
+    n_input=PREDICT_N_INPUT,
+    n_predict=PREDICT_N_PREDICT,
+    out_dir=str(output_dir),
 )
+
+print("\nGenerated files:")
+for seq, paths in results.items():
+    print(f"  {seq}: {len(paths)} frames")
+    for p in paths:
+        print(f"    {p}")
+
+# ---------------------------------------------------------------------------
+# ── GT vs Generated Comparison Table ──────────────────────────────────────
+# ---------------------------------------------------------------------------
+patient_sessions = session_table[
+    session_table[sequences[0]].astype(str).str.contains(PREDICT_PATIENT_ID, na=False)
+].sort_values("session_date").reset_index(drop=True)
+
+comparison_csv = output_dir / "comparison_table.csv"
+comparison_summary_csv = output_dir / "comparison_summary.csv"
+
+cmp_df, summary_df = save_comparison_table(
+    generated_results=results,
+    patient_sessions=patient_sessions,
+    data_root=data_root,
+    seqs=sequences,
+    hw=(H, W),
+    n_input=PREDICT_N_INPUT,
+    out_csv=comparison_csv,
+    out_summary_csv=comparison_summary_csv,
+)
+
+print(f"\nSaved comparison table → {comparison_csv}")
+print(f"Saved comparison summary → {comparison_summary_csv}")
+if not summary_df.empty:
+    print("\nPer-sequence mean metrics:")
+    print(summary_df.to_string(index=False))

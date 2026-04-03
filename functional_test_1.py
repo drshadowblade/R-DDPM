@@ -9,27 +9,28 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 print(f"Using device: {device}")
 torch.set_default_device(device)
 
-B, C, H, W = 1, 1, 32, 32
+B, C, H, W = 1, 1, 64, 64
 base_dim = 64
 n_visits = 8
-T = 200
+T = 500
 
-def make_bullet_frame(pos_x, H=32, W=32):
+def make_bullet_frame(pos_x, H=64, W=64):
     """White rectangle moving across a black canvas."""
     frame = torch.zeros(1, 1, H, W)
     x = int(pos_x * W)
     frame[0, 0, H//2-2:H//2+2, max(0,x-3):min(W,x+3)] = 1.0
-    return frame
+    return frame * 2 - 1
 
 positions = torch.linspace(0.1, 0.9, n_visits)
-x0_seq = torch.stack([make_bullet_frame(pos) for pos in positions], dim=0)
+x0_seq = torch.stack([make_bullet_frame(pos, H=H, W=W) for pos in positions], dim=0)
 lt_seq = torch.arange(n_visits, dtype=torch.long)
 
-model = RDDIM(
+model = RDDPM(
     input_size=(H, W),
     n_channels=C,
     base_dim=base_dim,
     T=T,
+    gru_n_layers=3,
     beta_schedule="Linear"
 )
 
@@ -45,7 +46,7 @@ with torch.no_grad():
 
 fig, axes = plt.subplots(2, n_visits, figsize=(n_visits * 2, 4))
 for i in range(n_visits):
-    axes[0, i].imshow(x0_seq[i][0, 0].cpu(), cmap='gray', vmin=0, vmax=1)
+    axes[0, i].imshow(x0_seq[i][0, 0].cpu(), cmap='gray', vmin=-1, vmax=1)
     axes[0, i].set_title(f"GT v{i}")
     axes[0, i].axis('off')
 
