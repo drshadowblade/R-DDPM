@@ -17,7 +17,7 @@ OUT_FILE = OUT_DIR / "all_sequences_compare.png"
 PATIENT_ID = "P001"
 SEQUENCES = ["FLAIR", "POST", "PRE", "T2"]
 START_VISIT = 5
-N_VISITS = 8
+N_VISITS = 15
 # ==== END CONSTANTS ====
 
 

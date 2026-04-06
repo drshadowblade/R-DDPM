@@ -65,9 +65,10 @@ class RUnet(UNet):
         return out, h
     
 class RDDPM(nn.Module):
-    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 3, n_heads=8, n_res_blocks=1, beta_start =1e-4, beta_end=0.02, T=1000, beta_schedule='cosine'):
+    def __init__(self, input_size, n_channels, base_dim, gru_n_layers = 3, n_heads=8, n_res_blocks=1, beta_start =1e-4, beta_end=0.02, T=1000, beta_schedule='cosine', truncated_bptt_steps=4):
         super().__init__()
         self.T = T
+        self.truncated_bptt_steps = int(truncated_bptt_steps) if truncated_bptt_steps is not None else 0
         self.model = RUnet(input_size, n_channels, base_dim, gru_n_layers, n_heads, n_res_blocks)
         if beta_schedule == 'cosine':
             self.beta = cosine_beta_schedule(T, s=0.008)
@@ -137,10 +138,11 @@ class RDDPM(nn.Module):
         return outputs
     def train_step(self, x0_seq, lt_seq, device=None):
         h = None
-        total_loss = 0
+        total_loss = 0.0
+        n_steps = 0
         if device is None:
             device = next(self.model.parameters()).device
-        for x0, lt in zip(x0_seq, lt_seq):
+        for step_idx, (x0, lt) in enumerate(zip(x0_seq, lt_seq)):
             x0 = x0.to(device)
             dt = torch.randint(0, self.T, (x0.size(0),), device=device)
             lt = lt.expand(x0.size(0)).to(device)
@@ -151,12 +153,18 @@ class RDDPM(nn.Module):
                 else:
                     h = h.to(device)
             pred_noise, h = self.model(xt, dt, lt, h)
-            if h is not None:
+            total_loss += nn.MSELoss()(pred_noise, noise)
+            n_steps += 1
+
+            # Keep temporal gradient flow, but truncate every few visits to avoid instability.
+            if h is not None and self.truncated_bptt_steps > 0 and (step_idx + 1) % self.truncated_bptt_steps == 0:
                 if isinstance(h, list):
                     h = [hi.detach() for hi in h]
                 else:
                     h = h.detach()
-            total_loss += nn.MSELoss()(pred_noise, noise)
+
+        if n_steps > 0:
+            total_loss = total_loss / n_steps
         self.optimizer.zero_grad()
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
