@@ -242,6 +242,7 @@ def generate(
     patient_id: str,
     n_input: int = 5,
     n_predict: int = 10,
+    interval_months: float = 1.0,
     out_dir: str = "output/",
 ) -> dict:
     """
@@ -260,6 +261,9 @@ def generate(
         Recommended: 5. Use 0 for a cold start (lower quality).
     n_predict : int
         Number of future visits to generate after the warmup visits.
+    interval_months : float
+        Time interval between visits in months (e.g. 1.0 for monthly, 0.5 for bi-weekly).
+        Used to compute proper time embeddings for the model.
     out_dir : str
         Folder where generated PNG files will be saved.
 
@@ -289,13 +293,15 @@ def generate(
     n_input = min(n_input, n_available)
 
     # Warmup frames (real visits fed to GRU)
+    # Use actual time values based on interval_months
     pre_images = [f.to(device) for f in all_frames[:n_input]]
-    pre_times  = list(range(n_input))
+    pre_times  = [round(i * interval_months, 4) for i in range(n_input)]
 
-    # Visit indices to generate
+    # Visit times to generate (continues after the last warmup session)
     start_visit = n_input
     end_visit   = n_input + n_predict
-    lt_seq      = torch.arange(start_visit, end_visit, dtype=torch.long)
+    lt_seq_values = [round((start_visit + j) * interval_months, 4) for j in range(n_predict)]
+    lt_seq      = torch.tensor(lt_seq_values, dtype=torch.float32)
 
     if isinstance(img_size, int):
         H = W = img_size

@@ -3,11 +3,12 @@ from pathlib import Path
 
 # ==== CONSTANTS ====
 BASE_DIR   = Path(__file__).resolve().parent
-CHECKPOINT = BASE_DIR / 'checkpoints/latest.pth'
+CHECKPOINT = BASE_DIR / 'checkpoints/latest (1).pth'
 DATA_PATH  = BASE_DIR / 'training_data'
 PATIENT_ID = 'P001'
 N_INPUT    = 5
 N_PREDICT  = 15
+INTERVAL   = 1.0
 OUT_DIR    = BASE_DIR / 'output/predict'
 # ==== END CONSTANTS ====
 
@@ -20,6 +21,7 @@ def main() -> None:
         patient_id=PATIENT_ID,
         n_input=N_INPUT,
         n_predict=N_PREDICT,
+        interval_months=INTERVAL,
         out_dir=str(OUT_DIR),
     )
 

@@ -3,17 +3,13 @@ import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 
-import torch
-import numpy as np
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# These imports come from your teammate's files already in the repo
-from utils import load_session_tensor, sample_and_save
-from RDDPM import RDDPM
+from utils import load_model, generate
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +20,7 @@ DATA_ROOT  = Path("training_data")
 IMAGES_DIR = DATA_ROOT / "images"
 CSV_PATH   = DATA_ROOT / "session_table.csv"
 OUTPUT_DIR = Path("output/predict")
-CHECKPOINT = Path("checkpoints/1900.pth")
+CHECKPOINT_PATH = "checkpoints/latest (1).pth"
 
 # Create folders if they don't exist yet
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -39,23 +35,8 @@ if not CSV_PATH.exists():
     ]).to_csv(CSV_PATH, index=False)
 
 # ── Load the model once when the server starts ────────────────────────────────
-# The checkpoint is the .pth file your teammate gives you
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-ckpt   = torch.load(CHECKPOINT, map_location=DEVICE)
-HP     = ckpt["hyperparams"]   # size, sequences, base_dim, gru_layers, res_blocks, T, beta_schedule
-
-model = RDDPM(
-    input_size    = HP["size"],
-    n_channels    = len(HP["sequences"]),
-    base_dim      = HP["base_dim"],
-    gru_n_layers  = HP["gru_layers"],
-    n_res_blocks  = HP["res_blocks"],
-    T             = HP["T"],
-    beta_schedule = HP["beta_schedule"],
-).to(DEVICE)
-model.load_state_dict(ckpt["model_state"])
-model.eval()
-logger.info(f"Model loaded on {DEVICE} | sequences: {HP['sequences']}")
+model_info = load_model(CHECKPOINT_PATH)
+logger.info(f"Model loaded on {model_info['device']} | sequences: {model_info['sequences']}")
 
 # ── In-memory task store ──────────────────────────────────────────────────────
 # Stores status + results for each prediction job keyed by task_id
@@ -210,8 +191,8 @@ def get_status(task_id: str):
 def health():
     return {
         "status":    "ok",
-        "device":    str(DEVICE),
-        "sequences": HP["sequences"],
+        "device":    model_info["device"],
+        "sequences": model_info["sequences"],
     }
 
 
@@ -227,74 +208,30 @@ def run_inference(
     interval_months: float,
 ):
     try:
-        tasks[task_id]["status"] = "loading_sessions"
-
-        # Read all sessions for this patient from the CSV, sorted by date
-        df           = pd.read_csv(CSV_PATH)
-        patient_rows = (
-            df[df["patient_id"] == patient_id]
-            .sort_values("session_date")
-            .reset_index(drop=True)
-        )
-
-        if patient_rows.empty:
-            raise ValueError(f"No sessions found for patient {patient_id}")
-
-        n_available = len(patient_rows)
-        n_input     = min(n_input, n_available) if n_input else n_available
-
-        # Load each session row into a tensor using your teammate's load_session_tensor
-        frames = [
-            load_session_tensor(row, DATA_ROOT, HP["sequences"], HP["size"])
-            for _, row in patient_rows.iterrows()
-        ]
-
-        # pre_images: the sessions used to warm up the GRU hidden state
-        pre_images = [frames[i].to(DEVICE) for i in range(n_input)]
-
-        # pre_times: visit index for each warm-up session
-        # monthly  (1.0) → [0.0, 1.0, 2.0, ...]
-        # biweekly (0.5) → [0.0, 0.5, 1.0, 1.5, ...]
-        pre_times = [round(i * interval_months, 4) for i in range(n_input)]
-
-        # lt_seq: visit labels for the future frames we want to generate
-        # continues the same interval pattern after the last warm-up session
-        lt_seq_values = [round((n_input + j) * interval_months, 4) for j in range(n_future)]
-        lt_seq        = torch.tensor(lt_seq_values, dtype=torch.float32).to(DEVICE)
-
-        logger.info(
-            f"[{task_id}] patient={patient_id} | "
-            f"n_input={n_input} | pre_times={pre_times} | "
-            f"predicting={lt_seq_values}"
-        )
-
         tasks[task_id]["status"] = "running"
 
-        # Output folder for this specific task
         task_out = OUTPUT_DIR / task_id
         task_out.mkdir(parents=True, exist_ok=True)
 
-        # Call sample_and_save — exactly what predict.py does
-        # compare=False because we have no ground truth at inference time
-        sample_and_save(
-            model      = model,
-            gt_frames  = None,
-            lt_seq     = lt_seq,
-            img_size   = HP["size"],
-            sequences  = HP["sequences"],
-            out_dir    = str(task_out),
-            T          = HP["T"],
-            compare    = False,
-            pre_images = pre_images,
-            pre_times  = pre_times,
+        logger.info(
+            f"[{task_id}] patient={patient_id} | "
+            f"n_input={n_input} | n_future={n_future}"
         )
 
-        # Collect the URLs for all generated PNG files
-        # sample_and_save names them gen_FLAIR_v0.png, gen_pre_v0.png, etc.
-        result_urls = [
-            f"/output/predict/{task_id}/{f.name}"
-            for f in sorted(task_out.glob("gen_*.png"))
-        ]
+        result = generate(
+            model=model_info,
+            data_path=str(DATA_ROOT),
+            patient_id=patient_id,
+            n_input=n_input,
+            n_predict=n_future,
+            interval_months=interval_months,
+            out_dir=str(task_out),
+        )
+
+        result_urls = []
+        for seq, paths in result.items():
+            for p in paths:
+                result_urls.append(f"/output/predict/{task_id}/{Path(p).name}")
 
         tasks[task_id] = {"status": "done", "result_urls": result_urls}
         logger.info(f"[{task_id}] Done — {len(result_urls)} images generated")

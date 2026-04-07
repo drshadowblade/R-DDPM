@@ -11,3 +11,4 @@ training_data/
 training_data.zip
 checkpoints/
 output/
+venv
