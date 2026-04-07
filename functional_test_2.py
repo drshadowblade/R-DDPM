@@ -12,11 +12,12 @@ torch.set_default_device(device)
 B, C, H, W = 1, 1, 64, 64
 base_dim = 64
 n_visits = 12
-T = 1000
-TRAIN_STEPS = 5000
+T = 500
+TRAIN_STEPS = 4000
+N_INPUT = 4
 total_start = time.perf_counter()
 
-def make_circle_frame(pos_x, radius, H=32, W=32):
+def make_circle_frame(pos_x, radius, H=64, W=64):
     frame = torch.zeros(1, 1, H, W)
     cx = int(pos_x * W)
     cy = H // 2
@@ -29,7 +30,7 @@ def make_circle_frame(pos_x, radius, H=32, W=32):
     return frame
 
 
-def make_sequence(n_visits, H=32, W=32, grow_then_shrink=True):
+def make_sequence(n_visits, H=64, W=64, grow_then_shrink=True):
     positions = torch.linspace(0.15, 0.85, n_visits)
     if grow_then_shrink:
         radii = [2 + 5 * np.sin(np.pi * i / (n_visits - 1)) for i in range(n_visits)]
@@ -41,8 +42,7 @@ def make_sequence(n_visits, H=32, W=32, grow_then_shrink=True):
 
 print("Building synthetic sequences...")
 seq_build_start = time.perf_counter()
-seq1_frames, seq1_pos, seq1_radii = make_sequence(n_visits, grow_then_shrink=True, H=H, W=W)
-seq2_frames, seq2_pos, seq2_radii = make_sequence(n_visits, grow_then_shrink=False, H=H, W=W)
+seq_frames, seq_pos, seq_radii = make_sequence(n_visits, grow_then_shrink=True, H=H, W=W)
 seq_build_elapsed = time.perf_counter() - seq_build_start
 print(f"Built sequences in {seq_build_elapsed:.3f}s")
 lt_seq = torch.arange(n_visits, dtype=torch.long)
@@ -56,39 +56,50 @@ model = RDDPM(
     T=T,
     beta_schedule="Linear"
 )
+model = model.to(device)
 print("Model instantiated.")
 
-print(f"Training for {TRAIN_STEPS} steps (alternating sequences)...")
+print(f"Training for {TRAIN_STEPS} steps on the single grow-then-shrink sequence...")
 train_start = time.perf_counter()
 for step in range(TRAIN_STEPS):
-    seq = seq1_frames if step % 2 == 0 else seq2_frames
-    loss = model.train_step(seq, lt_seq)
+    loss = model.train_step(seq_frames, lt_seq, device=device)
     if step % 50 == 0:
         print(f"  Step {step:3d}: loss = {loss:.4f}")
 train_elapsed = time.perf_counter() - train_start
 print(f"Training finished in {train_elapsed:.3f}s (avg {train_elapsed/max(1,TRAIN_STEPS):.3f}s/step)")
 
-print("Sampling both sequences...")
+print("Sampling future visits with warm-start context...")
 with torch.no_grad():
-    sample1_start = time.perf_counter()
-    gen1 = model.sample(shape=(B, C, H, W), T=T, lt_seq=lt_seq)
-    sample1_elapsed = time.perf_counter() - sample1_start
-    print(f"Sampling seq1 took {sample1_elapsed:.3f}s")
+    sample_start = time.perf_counter()
+    pre_images = [f.to(device) for f in seq_frames[:N_INPUT]]
+    pre_times = list(range(N_INPUT))
+    lt_future = torch.arange(N_INPUT, n_visits, dtype=torch.long)
+    gen_future = model.sample(
+        shape=(B, C, H, W),
+        T=T,
+        lt_seq=lt_future,
+        pre_images=pre_images,
+        pre_times=pre_times,
+        device=device,
+    )
+    gen = [f.detach().cpu() for f in seq_frames[:N_INPUT]] + gen_future
+    sample_elapsed = time.perf_counter() - sample_start
+    print(f"Sampling sequence took {sample_elapsed:.3f}s")
+    gen_stats = [
+        (i, float(g.min()), float(g.max()), float(g.mean()))
+        for i, g in enumerate(gen)
+    ]
+    print("Generated frame stats (idx, min, max, mean):")
+    for item in gen_stats:
+        print(f"  {item[0]:2d}: min={item[1]: .3f}, max={item[2]: .3f}, mean={item[3]: .3f}")
 
-    sample2_start = time.perf_counter()
-    gen2 = model.sample(shape=(B, C, H, W), T=T, lt_seq=lt_seq)
-    sample2_elapsed = time.perf_counter() - sample2_start
-    print(f"Sampling seq2 took {sample2_elapsed:.3f}s")
+fig, axes = plt.subplots(2, n_visits, figsize=(n_visits * 2, 4))
+row_labels = ["GT grow-then-shrink", "Gen grow-then-shrink"]
+rows = [seq_frames, gen]
 
-fig, axes = plt.subplots(4, n_visits, figsize=(n_visits * 2, 8))
-row_labels = ["GT seq1 (grow)", "Gen seq1", "GT seq2 (shrink)", "Gen seq2"]
-gt_seqs = [seq1_frames, seq1_frames, seq2_frames, seq2_frames]
-gen_seqs = [seq1_frames, gen1, seq2_frames, gen2]
-
-for row_idx, (label, gt, gen) in enumerate(zip(row_labels, gt_seqs, gen_seqs)):
-    use = gt if "GT" in label else gen
+for row_idx, (label, frames) in enumerate(zip(row_labels, rows)):
     for col in range(n_visits):
-        img = use[col][0, 0].cpu().numpy()
+        img = torch.clamp(frames[col][0, 0].detach().cpu().float(), -1, 1).numpy()
         axes[row_idx, col].imshow(img, cmap='gray', vmin=-1, vmax=1)
         axes[row_idx, col].axis('off')
         if col == 0:
@@ -96,10 +107,10 @@ for row_idx, (label, gt, gen) in enumerate(zip(row_labels, gt_seqs, gen_seqs)):
         if row_idx == 0:
             axes[row_idx, col].set_title(f"v{col}", fontsize=7)
 
-plt.suptitle("R-DDPM Longitudinal Test: Growing/Shrinking Circle", fontsize=11)
+plt.suptitle("R-DDPM Longitudinal Test: Single Growing/Shrinking Circle", fontsize=11)
 plt.tight_layout()
 plt.savefig('functional_test_grid.png', dpi=150)
-grid_elapsed = time.perf_counter() - (sample2_start + sample2_elapsed)
+grid_elapsed = time.perf_counter() - (sample_start + sample_elapsed)
 print("\nSaved functional_test_grid.png")
 print(f"Grid generation + save took {grid_elapsed:.3f}s (approx)")
 
@@ -112,8 +123,8 @@ def save_gif(gt_frames, gen_frames, filename, title):
 
     anim_frames = []
     for gt, gen in zip(gt_frames, gen_frames):
-        gt_img = gt[0, 0].cpu().numpy()
-        gen_img = gen[0, 0].cpu().numpy()
+        gt_img = torch.clamp(gt[0, 0].detach().cpu().float(), -1, 1).numpy()
+        gen_img = torch.clamp(gen[0, 0].detach().cpu().float(), -1, 1).numpy()
         im1 = axes2[0].imshow(gt_img, animated=True, cmap='gray', vmin=-1, vmax=1)
         im2 = axes2[1].imshow(gen_img, animated=True, cmap='gray', vmin=-1, vmax=1)
         axes2[0].axis('off')
@@ -126,14 +137,10 @@ def save_gif(gt_frames, gen_frames, filename, title):
     gif_elapsed = time.perf_counter() - gif_start
     print(f"Saved {filename} in {gif_elapsed:.3f}s")
 
-gif1_start = time.perf_counter()
-save_gif(seq1_frames, gen1, 'gen_seq1_grow.gif',    'Seq 1: Circle Grows as it Moves')
-gif1_elapsed = time.perf_counter() - gif1_start
-
-gif2_start = time.perf_counter()
-save_gif(seq2_frames, gen2, 'gen_seq2_shrink.gif',  'Seq 2: Circle Shrinks as it Moves')
-gif2_elapsed = time.perf_counter() - gif2_start
+gif_start = time.perf_counter()
+save_gif(seq_frames, gen, 'gen_grow_then_shrink.gif', 'Single Sequence: Circle Grows Then Shrinks')
+gif_elapsed = time.perf_counter() - gif_start
 
 total_elapsed = time.perf_counter() - total_start
-print(f"\nGIFs: gif1 {gif1_elapsed:.3f}s, gif2 {gif2_elapsed:.3f}s")
+print(f"\nGIF: {gif_elapsed:.3f}s")
 print(f"Total script time: {total_elapsed:.3f}s")

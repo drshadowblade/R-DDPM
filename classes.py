@@ -2,10 +2,8 @@ import torch.nn as nn
 import torch
 from torch.utils.data import Dataset
 import numpy as np
-import nibabel as nib
 from pathlib import Path
 import pandas as pd
-from utils import load_session_tensor
 
 class SinPositionalEmbedding(nn.Module):
     def __init__(self, dim):
